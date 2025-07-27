@@ -12,6 +12,7 @@ A flexible HTTP proxy library for Go with built-in Man-in-the-Middle (MITM) capa
 - ⚙️ **Configurable**: Customizable timeouts, connection limits, and TLS settings
 - 🛡️ **Connect Handling**: Flexible CONNECT request handling (Accept/Reject/MITM)
 
+
 ## License
 
 [MIT](LICENSE)
