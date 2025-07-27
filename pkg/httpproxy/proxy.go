@@ -1,6 +1,7 @@
 package httpproxy
 
 import (
+	"bufio"
 	"context"
 	"crypto/tls"
 	"errors"
@@ -31,6 +32,7 @@ type (
 	RequestInterceptor  func(*http.Request)
 	ResponseInterceptor func(*http.Response) error
 	ConnectInterceptor  func(*http.Request) (ConnectAction, []byte)
+	WsInterceptor       func(*WebSocketMessage) *WebSocketMessage
 )
 
 // Predefined connect interceptors
@@ -40,10 +42,19 @@ var (
 	MitmConnect   = func(req *http.Request) (ConnectAction, []byte) { return Mitm, nil }
 )
 
+// WebSocketMessage represents a WebSocket message for MITM
+type WebSocketMessage struct {
+	Type       int // websocket.TextMessage, websocket.BinaryMessage, etc.
+	Data       []byte
+	FromClient bool // true if from client, false if from server
+}
+
 type HttpProxy struct {
-	OnRequest  []RequestInterceptor
-	OnResponse []ResponseInterceptor
-	OnConnect  ConnectInterceptor
+	OnRequest   []RequestInterceptor
+	OnResponse  []ResponseInterceptor
+	OnConnect   ConnectInterceptor
+	OnWsConnect ConnectInterceptor
+	OnWsMessage WsInterceptor
 
 	handler   http.Handler
 	cm        *cert.CertManager
@@ -59,7 +70,7 @@ func NewHttpProxy(config *Config) (*HttpProxy, error) {
 	}
 	cm, err := cert.NewCertManager(nil, nil)
 	if err != nil {
-		return nil, fmt.Errorf("failed to create certificate managert: %w", err)
+		return nil, fmt.Errorf("failed to create certificate manager: %w", err)
 	}
 	transport := createTransport(config)
 	p := &HttpProxy{cm: cm, Config: config, Transport: transport}
@@ -108,6 +119,10 @@ func NewHttpReverseProxy(config *Config, target string) (*HttpProxy, error) {
 func (proxy *HttpProxy) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 	if req.Method == http.MethodConnect && !proxy.isReverse {
 		proxy.handleConnect(w, req)
+		return
+	}
+	if isWebsocketUpgrade(req) {
+		proxy.handleWebsocket(w, req)
 		return
 	}
 	proxy.handler.ServeHTTP(w, req)
@@ -194,11 +209,34 @@ func (proxy *HttpProxy) mitmConnection(w http.ResponseWriter, req *http.Request)
 		proxy.logger.Error("failed to write 200 response", "error", err)
 		return
 	}
+
+	bufferedClient := bufio.NewReader(clientConn)
+	connWrapper := &BufferedConn{Conn: clientConn, Reader: bufferedClient}
+	peek, err := connWrapper.Peek(3)
+	if err != nil {
+		proxy.logger.Error("failed to check connection type", "error", err)
+		return
+	}
+
 	host := req.Host
 	if strings.Contains(host, ":") {
 		host, _, _ = net.SplitHostPort(host)
 	}
 
+	if !isTls(peek) {
+		fmt.Println("NORMAL CONNECTION")
+		notify := ConnNotify{connWrapper, make(chan struct{})}
+		l := &OnceAcceptListener{notify.Conn}
+		err := http.Serve(l, proxy)
+		if err != nil && !errors.Is(err, ErrAlreadyAccepted) {
+			proxy.logger.Error("failed to serve plain HTTP request", "error", err)
+		}
+
+		<-notify.closed
+		return
+	}
+
+	proxy.logger.Debug("Running normal tls connection")
 	config := &tls.Config{GetCertificate: func(chi *tls.ClientHelloInfo) (*tls.Certificate, error) {
 		name := host
 		if chi.ServerName != "" {
@@ -207,7 +245,7 @@ func (proxy *HttpProxy) mitmConnection(w http.ResponseWriter, req *http.Request)
 		return proxy.cm.CreateGetCertHost(name)
 	}}
 
-	tlsClientConn := tls.Server(clientConn, config)
+	tlsClientConn := tls.Server(connWrapper, config)
 	if err := tlsClientConn.Handshake(); err != nil {
 		proxy.logger.Error("client TLS handshake failed.", "error", err)
 		return
@@ -275,4 +313,9 @@ func (proxy *HttpProxy) UseResponse(fn ResponseInterceptor) {
 
 func (proxy *HttpProxy) ClearResponseMiddlewares() {
 	proxy.OnResponse = make([]ResponseInterceptor, 0)
+}
+
+// https://github.com/mitmproxy/mitmproxy/blob/main/mitmproxy/net/tls.py starts_like_tls_record
+func isTls(buf []byte) bool {
+	return len(buf) > 2 && buf[0] == 0x16 && buf[1] == 0x03 && buf[2] <= 0x03
 }

@@ -2,6 +2,7 @@ package httpproxy
 
 // https://github.com/dstotijn/hetty/blob/main/pkg/proxy/net.go
 import (
+	"bufio"
 	"errors"
 	"net"
 )
@@ -45,4 +46,18 @@ type ConnNotify struct {
 func (c *ConnNotify) Close() {
 	c.Conn.Close()
 	c.closed <- struct{}{}
+}
+
+// BufferedConn wraps a connection with a buffered reader
+type BufferedConn struct {
+	net.Conn
+	Reader *bufio.Reader
+}
+
+func (bc *BufferedConn) Read(b []byte) (int, error) {
+	return bc.Reader.Read(b)
+}
+
+func (bc *BufferedConn) Peek(n int) ([]byte, error) {
+	return bc.Reader.Peek(3)
 }
