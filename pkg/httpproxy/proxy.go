@@ -59,21 +59,19 @@ type HttpProxy struct {
 	handler   http.Handler
 	cm        *cert.CertManager
 	logger    *slog.Logger
-	Config    *Config
 	Transport *http.Transport
 	isReverse bool
 }
 
-func NewHttpProxy(config *Config) (*HttpProxy, error) {
-	if config == nil {
-		config = DefaultConfig()
+func NewHttpProxy(certManager *cert.CertManager) (*HttpProxy, error) {
+	if certManager == nil {
+		cm, err := cert.NewCertManager(nil, nil)
+		if err != nil {
+			return nil, fmt.Errorf("failed to create certificate manager: %w", err)
+		}
+		certManager = cm
 	}
-	cm, err := cert.NewCertManager(nil, nil)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create certificate manager: %w", err)
-	}
-	transport := createTransport(config)
-	p := &HttpProxy{cm: cm, Config: config, Transport: transport}
+	p := &HttpProxy{cm: certManager, Transport: DefaultProxyTransport}
 	p.logger = slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelDebug}))
 	p.ClearRequestMiddlewares()
 	p.ClearResponseMiddlewares()
@@ -81,31 +79,25 @@ func NewHttpProxy(config *Config) (*HttpProxy, error) {
 		Director:       p.modifyRequest,
 		ModifyResponse: p.modifyResponse,
 		ErrorHandler:   p.errorHandler,
-		Transport:      transport,
+		Transport:      p.Transport,
 	}
 
 	return p, nil
 }
 
-func NewHttpReverseProxy(config *Config, target string) (*HttpProxy, error) {
+func NewHttpReverseProxy(target string) (*HttpProxy, error) {
 	url, err := url.Parse(target)
 	if err != nil {
 		return nil, err
 	}
-
-	if config == nil {
-		config = DefaultConfig()
-	}
-
-	transport := createTransport(config)
-	p := &HttpProxy{Config: config, Transport: transport, isReverse: true}
+	p := &HttpProxy{Transport: DefaultProxyTransport, isReverse: true}
 	p.ClearRequestMiddlewares()
 	p.ClearResponseMiddlewares()
 
 	handler := httputil.NewSingleHostReverseProxy(url)
 	handler.ModifyResponse = p.modifyResponse
 	handler.ErrorHandler = p.errorHandler
-	handler.Transport = transport
+	handler.Transport = p.Transport
 	originalDirectory := handler.Director
 	directory := func(req *http.Request) {
 		originalDirectory(req)

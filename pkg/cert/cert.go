@@ -103,44 +103,12 @@ func (cm *CertManager) ClearCache() {
 
 // SaveCertToFile saves a root CA Cert to a PEM file
 func (cm *CertManager) SaveCertToFile(filename string) error {
-	certPEM := pem.EncodeToMemory(&pem.Block{
-		Type:  "CERTIFICATE",
-		Bytes: cm.rootCaCert.Raw,
-	})
-
-	file, err := os.Create(filename)
-	if err != nil {
-		return fmt.Errorf("failed to create file: %w", err)
-	}
-	defer file.Close()
-
-	_, err = file.Write(certPEM)
-	if err != nil {
-		return fmt.Errorf("failed to write certificate: %w", err)
-	}
-
-	return nil
+	return SaveCertificate(cm.rootCaCert, filename)
 }
 
 // SavePrivateKeyToFile saves a root private key to a PEM file
 func (cm *CertManager) SavePrivateKeyToFile(filename string) error {
-	keyPEM := pem.EncodeToMemory(&pem.Block{
-		Type:  "RSA PRIVATE KEY",
-		Bytes: x509.MarshalPKCS1PrivateKey(cm.rootCaKey),
-	})
-
-	file, err := os.Create(filename)
-	if err != nil {
-		return fmt.Errorf("failed to create file: %w", err)
-	}
-	defer file.Close()
-
-	_, err = file.Write(keyPEM)
-	if err != nil {
-		return fmt.Errorf("failed to write private key: %w", err)
-	}
-
-	return nil
+	return SavePrivateRsaKey(cm.rootCaKey, filename)
 }
 
 // CreateSelfSignedCA creates a self-signed Certificate Authority
@@ -189,6 +157,123 @@ func CreateSelfSignedCA(commonName string) (*x509.Certificate, *rsa.PrivateKey, 
 	cert, err := x509.ParseCertificate(certData)
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to parse certificate: %w", err)
+	}
+
+	return cert, key, nil
+}
+
+// LoadCertificate loads an X.509 certificate from a file and returns a parsed *x509.Certificate
+func LoadCertificate(certFile string) (*x509.Certificate, error) {
+	certPEM, err := os.ReadFile(certFile)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read certificate file: %w", err)
+	}
+
+	block, _ := pem.Decode(certPEM)
+	if block == nil || block.Type != "CERTIFICATE" {
+		return nil, fmt.Errorf("failed to decode PEM block containing certificate")
+	}
+
+	cert, err := x509.ParseCertificate(block.Bytes)
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse certificate: %w", err)
+	}
+
+	return cert, nil
+}
+
+// SaveCertificate saves a cert to a PEM file
+func SaveCertificate(cert *x509.Certificate, filename string) error {
+	certPEM := pem.EncodeToMemory(&pem.Block{
+		Type:  "CERTIFICATE",
+		Bytes: cert.Raw,
+	})
+
+	file, err := os.Create(filename)
+	if err != nil {
+		return fmt.Errorf("failed to create file: %w", err)
+	}
+	defer file.Close()
+
+	_, err = file.Write(certPEM)
+	if err != nil {
+		return fmt.Errorf("failed to write certificate: %w", err)
+	}
+
+	return nil
+}
+
+// LoadRSAPrivateKey loads an RSA private key from a PEM file
+func LoadRSAPrivateKey(keyFile string) (*rsa.PrivateKey, error) {
+	keyPEM, err := os.ReadFile(keyFile)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read key file: %w", err)
+	}
+
+	block, _ := pem.Decode(keyPEM)
+	if block == nil {
+		return nil, fmt.Errorf("failed to decode PEM block containing private key")
+	}
+
+	// Try PKCS#1 format
+	if key, err := x509.ParsePKCS1PrivateKey(block.Bytes); err == nil {
+		return key, nil
+	}
+
+	// Try PKCS#8 format
+	keyAny, err := x509.ParsePKCS8PrivateKey(block.Bytes)
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse private key: %w", err)
+	}
+
+	rsaKey, ok := keyAny.(*rsa.PrivateKey)
+	if !ok {
+		return nil, fmt.Errorf("not an RSA private key")
+	}
+
+	return rsaKey, nil
+}
+
+// SavePrivateRsaKey saves a private key to a PEM file
+func SavePrivateRsaKey(key *rsa.PrivateKey, filename string) error {
+	keyPEM := pem.EncodeToMemory(&pem.Block{
+		Type:  "RSA PRIVATE KEY",
+		Bytes: x509.MarshalPKCS1PrivateKey(key),
+	})
+
+	file, err := os.Create(filename)
+	if err != nil {
+		return fmt.Errorf("failed to create file: %w", err)
+	}
+	defer file.Close()
+
+	_, err = file.Write(keyPEM)
+	if err != nil {
+		return fmt.Errorf("failed to write private key: %w", err)
+	}
+
+	return nil
+}
+
+func LoadOrCreateCa(certFile, keyFile string) (*x509.Certificate, *rsa.PrivateKey, error) {
+	cert, certErr := LoadCertificate(certFile)
+	key, keyErr := LoadRSAPrivateKey(keyFile)
+
+	if certErr == nil && keyErr == nil {
+		return cert, key, nil
+	}
+
+	cert, key, err := CreateSelfSignedCA("gomitmproxy")
+	if err != nil {
+		return nil, nil, fmt.Errorf("failed to create self-signed CA: %w", err)
+	}
+
+	if err := SaveCertificate(cert, certFile); err != nil {
+		return nil, nil, fmt.Errorf("failed to save certificate: %w", err)
+	}
+
+	if err := SavePrivateRsaKey(key, keyFile); err != nil {
+		return nil, nil, fmt.Errorf("failed to save private key: %w", err)
 	}
 
 	return cert, key, nil
