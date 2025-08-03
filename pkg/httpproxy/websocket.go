@@ -9,14 +9,23 @@ import (
 	"net/http"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/gorilla/websocket"
 )
+
+// WebSocketMessage represents a WebSocket message for MITM
+type WebSocketMessage struct {
+	Type       int // websocket.TextMessage, websocket.BinaryMessage, etc.
+	Data       []byte
+	FromClient bool // true if from client, false if from server
+}
 
 var upgrader = websocket.Upgrader{
 	CheckOrigin: func(r *http.Request) bool {
 		return true // Allow connections from any origin
 	},
+	HandshakeTimeout: 45 * time.Second,
 }
 
 func isWebsocketUpgrade(req *http.Request) bool {

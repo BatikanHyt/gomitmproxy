@@ -29,7 +29,7 @@ const (
 
 // Interceptor function types
 type (
-	RequestInterceptor  func(*http.Request)
+	RequestInterceptor  func(*http.Request) *http.Response
 	ResponseInterceptor func(*http.Response) error
 	ConnectInterceptor  func(*http.Request) (ConnectAction, []byte)
 	WsInterceptor       func(*WebSocketMessage) *WebSocketMessage
@@ -41,13 +41,6 @@ var (
 	AcceptConnect = func(req *http.Request) (ConnectAction, []byte) { return Accept, nil }
 	MitmConnect   = func(req *http.Request) (ConnectAction, []byte) { return Mitm, nil }
 )
-
-// WebSocketMessage represents a WebSocket message for MITM
-type WebSocketMessage struct {
-	Type       int // websocket.TextMessage, websocket.BinaryMessage, etc.
-	Data       []byte
-	FromClient bool // true if from client, false if from server
-}
 
 type HttpProxy struct {
 	OnRequest   []RequestInterceptor
@@ -116,6 +109,16 @@ func (proxy *HttpProxy) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 	if isWebsocketUpgrade(req) {
 		proxy.handleWebsocket(w, req)
 		return
+	}
+	if req.URL.Scheme == "" {
+		req.URL.Host = req.Host
+		req.URL.Scheme = "https"
+	}
+	for _, fn := range proxy.OnRequest {
+		if customResp := fn(req); customResp != nil {
+			proxy.writeResponse(w, customResp)
+			return
+		}
 	}
 	proxy.handler.ServeHTTP(w, req)
 }
@@ -263,10 +266,6 @@ func (proxy *HttpProxy) modifyRequest(req *http.Request) {
 
 	// Remove X-Forwarded-For header to avoid loops
 	delete(req.Header, "X-Forwarded-For")
-
-	for _, fn := range proxy.OnRequest {
-		fn(req)
-	}
 }
 
 func (proxy *HttpProxy) modifyResponse(r *http.Response) error {
@@ -289,6 +288,20 @@ func (proxy *HttpProxy) errorHandler(w http.ResponseWriter, r *http.Request, err
 	}
 
 	w.WriteHeader(http.StatusBadGateway)
+}
+
+func (proxy *HttpProxy) writeResponse(w http.ResponseWriter, resp *http.Response) {
+	// Copy headers
+	for k, v := range resp.Header {
+		w.Header()[k] = v
+	}
+	// Write status
+	w.WriteHeader(resp.StatusCode)
+	// Copy body
+	if resp.Body != nil {
+		io.Copy(w, resp.Body)
+		resp.Body.Close()
+	}
 }
 
 func (proxy *HttpProxy) UseRequest(fn RequestInterceptor) {
